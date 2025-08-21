@@ -1,98 +1,90 @@
+# -*- coding: utf-8 -*-
+"""
+Asistentul Comunității – Bot Telegram (PTB v20+)
+
+ENV necesar:
+  TELEGRAM_TOKEN   = tokenul botului de la BotFather
+  OPENAI_API_KEY   = cheia OpenAI
+  GROUP_ID         = -100xxxxxxxxxx  (chat id-ul grupului)
+  THREAD_ID        = <id-ul topicului din grup> (int)
+  OWNER_USER_ID    = <id-ul tău telegram> (opțional, pt /ids)
+
+Comenzi:
+  /ping               => răspunde "pong ✅" (test rapid că botul rulează)
+  /ids                => afișează chat.id & thread_id (doar OWNER_USER_ID, dacă setat)
+  /ask <întrebare>    => răspunde cu OpenAI DOAR în grupul + topicul permis
+"""
+
 import os
 import logging
 from datetime import datetime
-from typing import Optional
 
 from telegram import Update
 from telegram.constants import ChatAction, ParseMode, ChatType
 from telegram.ext import (
-    ApplicationBuilder, CommandHandler, MessageHandler,
-    ContextTypes, filters
+    ApplicationBuilder,
+    CommandHandler,
+    ContextTypes,
 )
 
 # OpenAI SDK 1.x
 from openai import OpenAI
 
+# ---------------- LOGGING ----------------
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+)
+log = logging.getLogger("asistent-comunitate")
+
 # ---------------- ENV ----------------
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 
-# Grupul & topicul tău (au și valori default utile)
-GROUP_ID  = int(os.getenv("GROUP_ID", "-1002343579283"))
-THREAD_ID = int(os.getenv("THREAD_ID", "784"))
+# Grupul & topicul unde botul are voie să răspundă
+GROUP_ID = int(os.getenv("GROUP_ID", "0"))
+THREAD_ID = int(os.getenv("THREAD_ID", "0"))
 
-# opțional, numai pentru /ids (dacă vrei să vezi rapid id-urile)
+# opțional – numai pt. comanda /ids
 OWNER_USER_ID = int(os.getenv("OWNER_USER_ID", "0"))
 
-SYSTEM_PROMPT = os.getenv("SYSTEM_PROMPT", (
-    "Ești Asistentul Comunității pentru grupul lui Paul. Rol 100% educațional și de ghidaj.\n"
-    "Ce faci: explici relația emoții–corp în cadrul (5LB/NMG, Recall Healing, spiritual), "
-    "oferi pași de reflecție, întrebări de jurnal, exerciții simple. Ton empatic, clar, concis (5–8 rânduri), în pași/bullet-uri.\n"
-    "Ce NU faci: nu pui diagnostic, nu recomanzi tratamente/medicamente/doze/investigații, nu promiți vindecare, "
-    "nu inventa titluri de meditații; folosește doar ce există în Knowledge. Dacă nu ai destule date, spune asta și propune 3–5 întrebări de jurnal.\n"
-    "Dacă utilizatorul cere diagnostic/tratament sau apar semne de urgență: "
-    "«Nu pot oferi diagnostic sau indicații medicale. Pentru probleme medicale, adresează-te unui specialist sau 112.»\n"
-    "Dacă folosești web, ai voie DOAR pe site-urile aprobate NMG: learninggnm.com, leyesbiologicas.com, "
-    "germanische-heilkunde.at, amici-di-dirk.com, ghk-academy.info, newmedicine.ca"
-))
-
-RESOURCES_TEXT = os.getenv("RESOURCES_TEXT", 
-    "📚 **Resursele comunității**\n"
-    "• Meditații: (adaugi linkurile tale)\n"
-    "• Ghid întrebări de jurnal: (link)\n"
-    "• Glosar: (link)\n"
-)
-
-PRIVACY_TEXT = os.getenv("PRIVACY_TEXT",
-    "🔒 **Confidențialitate**\n"
-    "Botul este strict educațional; nu oferă diagnostic sau tratament medical. "
-    "Nu stocăm istoricul conversațiilor în acest MVP. Poți cere ștergerea cu /delete_me."
-)
-
-if not TELEGRAM_TOKEN or not OPENAI_API_KEY:
-    raise RuntimeError("Setează TELEGRAM_TOKEN și OPENAI_API_KEY în environment.")
-
-# ---------------- LOGGING ----------------
-logging.basicConfig(level=logging.INFO)
-log = logging.getLogger("asistent-comunitate")
+if not TELEGRAM_TOKEN:
+    raise RuntimeError("Lipsea TELEGRAM_TOKEN în environment.")
+if not OPENAI_API_KEY:
+    raise RuntimeError("Lipsea OPENAI_API_KEY în environment.")
+if not GROUP_ID or not THREAD_ID:
+    log.warning("Atenție: GROUP_ID sau THREAD_ID nu sunt setate. /ask va refuza în afara locului permis.")
 
 # ---------------- OpenAI client ----------------
 oai = OpenAI(api_key=OPENAI_API_KEY)
 
-async def ask_openai(user_msg: str) -> str:
-    """
-    Apel sincronic la OpenAI rulat în thread separat ca să nu blocheze event loop-ul PTB.
-    """
-    def _call():
-        r = oai.chat.completions.create(
-            model="gpt-4o-mini",
-            temperature=0.4,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_msg.strip()},
-            ],
-        )
-        return r.choices[0].message.content.strip()
-
-    # rulează în executor (thread pool)
-    from concurrent.futures import ThreadPoolExecutor
-    import asyncio
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(ThreadPoolExecutor(max_workers=4), _call)
+# Prompt de sistem – succint și sigur
+SYSTEM_PROMPT = (
+    "Ești Asistentul Comunității pentru grupul lui Paul. Răspunzi exclusiv în scop educațional, "
+    "explicând legături emoții–corp (5LB/NMG, Recall Healing) în mod empatic și clar, 5–8 rânduri. "
+    "NU oferi diagnostic/indicații medicale/medicație/doze/investigații, nu promiți vindecare. "
+    "Dacă nu ai destule date, spune asta și propune 3–5 întrebări de jurnal scurte."
+)
 
 # ---------------- Helpers ----------------
 def in_allowed_place(update: Update) -> bool:
     """
-    True doar dacă mesajul e în grupul tău + în topicul permis.
+    Întoarce True doar dacă mesajul vine din grupul & topicul permise.
     """
     if not update.effective_chat or not update.effective_message:
         return False
+
+    # trebuie să fim în grupul corect
     if update.effective_chat.id != GROUP_ID:
         return False
-    # trebuie să fie mesaj de topic și thread-id să fie cel dorit
-    if not getattr(update.effective_message, "is_topic_message", False):
+
+    # trebuie să fie topic message & thread id corect
+    msg = update.effective_message
+    if not getattr(msg, "is_topic_message", False):
         return False
-    return update.effective_message.message_thread_id == THREAD_ID
+
+    return getattr(msg, "message_thread_id", None) == THREAD_ID
+
 
 async def send_typing(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -103,104 +95,112 @@ async def send_typing(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         pass
 
-# ---------------- Commands ----------------
-async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not in_allowed_place(update): 
-        return
-    await update.message.reply_text(
-        "Salut! Sunt *Asistentul Comunității*.\n"
-        "• /ask <întrebare>\n"
-        "• /anonask <întrebare> (în privat)\n"
-        "• /resources\n• /privacy\n• /delete_me",
-        parse_mode=ParseMode.MARKDOWN
-    )
 
-async def resources_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not in_allowed_place(update): 
-        return
-    await update.message.reply_text(RESOURCES_TEXT, disable_web_page_preview=True)
+# ---------------- OpenAI wrapper ----------------
+async def ask_openai(user_msg: str) -> str:
+    """
+    Apel la OpenAI, executat non-blocant.
+    """
+    import asyncio
+    from concurrent.futures import ThreadPoolExecutor
 
-async def privacy_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not in_allowed_place(update): 
-        return
-    await update.message.reply_text(PRIVACY_TEXT)
-
-async def delete_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not in_allowed_place(update): 
-        return
-    await update.message.reply_text("Nu stocăm istoricul conversațiilor în acest MVP. ✅")
-
-async def ask_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not in_allowed_place(update):
-        return
-    q = " ".join(context.args).strip()
-    if not q:
-        return await update.message.reply_text("Scrie: `/ask întrebarea ta`", parse_mode=ParseMode.MARKDOWN)
-
-    await send_typing(update, context)
-    try:
-        ans = await ask_openai(q)
-        await update.message.reply_text(ans, disable_web_page_preview=True)
-    except Exception as e:
-        log.exception("OpenAI error: %s", e)
-        await update.message.reply_text("A apărut o eroare. Te rog încearcă din nou.")
-
-# /anonask se trimite în PRIVAT → botul postează răspunsul anonim în topicul comunității
-async def anonask_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.type != ChatType.PRIVATE:
-        return await update.message.reply_text("Trimite-mi /anonask în privat, te rog. 😊")
-
-    q = " ".join(context.args).strip()
-    if not q:
-        return await update.message.reply_text("Scrie: `/anonask întrebarea ta`", parse_mode=ParseMode.MARKDOWN)
-
-    try:
-        ans = await ask_openai(q)
-        await context.bot.send_message(
-            chat_id=GROUP_ID,
-            message_thread_id=THREAD_ID,
-            text=f"*(Întrebare anonimă)*\n\n{ans}",
-            parse_mode=ParseMode.MARKDOWN,
-            disable_web_page_preview=True
+    def _call():
+        r = oai.chat.completions.create(
+            model="gpt-4o-mini",
+            temperature=0.4,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": user_msg.strip()},
+            ],
         )
-        await update.message.reply_text("Am postat răspunsul anonim în topicul comunității. ✅")
-    except Exception as e:
-        log.exception("Post to group error: %s", e)
-        await update.message.reply_text("Nu am putut posta în grup. Verifică dacă botul este admin în grup.")
+        return (r.choices[0].message.content or "").strip()
 
-# opțional – numai pentru tine (setează OWNER_USER_ID în env)
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(ThreadPoolExecutor(max_workers=4), _call)
+
+
+# ---------------- Commands ----------------
+async def ping_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Test simplu – nu implică OpenAI. Dacă răspunde, botul rulează ok.
+    """
+    await update.message.reply_text("pong ✅")
+
+
 async def ids_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not OWNER_USER_ID or update.effective_user.id != OWNER_USER_ID:
+    """
+    Afișează rapid id-urile utile (doar pt OWNER_USER_ID dacă e setat).
+    """
+    if OWNER_USER_ID and update.effective_user.id != OWNER_USER_ID:
         return
+
+    msg = update.effective_message
     info = (
         f"chat.id = {update.effective_chat.id}\n"
-        f"message_thread_id = {getattr(update.effective_message, 'message_thread_id', None)}\n"
-        f"is_topic_message = {getattr(update.effective_message, 'is_topic_message', None)}\n"
-        f"date = {datetime.fromtimestamp(update.effective_message.date.timestamp())}"
+        f"is_topic_message = {getattr(msg, 'is_topic_message', None)}\n"
+        f"message_thread_id = {getattr(msg, 'message_thread_id', None)}\n"
+        f"date = {datetime.fromtimestamp(msg.date.timestamp())}"
     )
     await update.message.reply_text(f"```\n{info}\n```", parse_mode=ParseMode.MARKDOWN)
 
-# Ignoră orice alt mesaj/comandă
-async def ignore_everything(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    return
+
+async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (
+        "Salut! Sunt *Asistentul Comunității*.\n\n"
+        "Comenzi utile:\n"
+        "• /ping – test rapid că botul e online\n"
+        "• /ids – (admin) afișează chat.id & thread_id\n"
+        "• /ask <întrebare> – răspunde *doar* în topicul comunității\n"
+    )
+    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+
+
+async def ask_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Întrebări către modelul OpenAI – **doar** în grupul/tema permise.
+    """
+    # răspunde doar în locul permis
+    if not in_allowed_place(update):
+        # în privat și în alte locuri – tăcere sau mesaj prietenos
+        if update.effective_chat.type == ChatType.PRIVATE:
+            await update.message.reply_text(
+                "Folosește comanda în topicul comunității. Acest bot răspunde doar acolo. 😊"
+            )
+        return
+
+    question = " ".join(context.args).strip()
+    if not question:
+        return await update.message.reply_text(
+            "Scrie: `/ask întrebarea ta`", parse_mode=ParseMode.MARKDOWN
+        )
+
+    await send_typing(update, context)
+
+    try:
+        answer = await ask_openai(question)
+        if not answer:
+            answer = "Nu am reușit să formulez un răspuns. Te rog încearcă din nou."
+
+        await update.message.reply_text(answer, disable_web_page_preview=True)
+
+    except Exception as e:
+        log.exception("Eroare la OpenAI: %s", e)
+        await update.message.reply_text("A apărut o eroare. Te rog încearcă din nou.")
+
 
 # ---------------- Main ----------------
 def main():
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
-    app.add_handler(CommandHandler(["start", "help"], start_cmd))
-    app.add_handler(CommandHandler("resources", resources_cmd))
-    app.add_handler(CommandHandler("privacy", privacy_cmd))
-    app.add_handler(CommandHandler("delete_me", delete_cmd))
-    app.add_handler(CommandHandler("ask", ask_cmd))
-    app.add_handler(CommandHandler("anonask", anonask_cmd))
-    app.add_handler(CommandHandler("ids", ids_cmd))  # doar pt. OWNER_USER_ID
-
-    # orice altceva ignorăm (asigură „tăcerea” în afara topicului)
-    app.add_handler(MessageHandler(filters.ALL, ignore_everything))
+    # Comenzi
+    app.add_handler(CommandHandler("start", start_cmd))
+    app.add_handler(CommandHandler("ping", ping_cmd))   # test viață
+    app.add_handler(CommandHandler("ids", ids_cmd))     # debug id-uri
+    app.add_handler(CommandHandler("ask", ask_cmd))     # întrebări OpenAI
 
     log.info("Botul pornește cu polling…")
-    app.run_polling()
+    app.run_polling(allowed_updates=["message"])
+
 
 if __name__ == "__main__":
     main()
