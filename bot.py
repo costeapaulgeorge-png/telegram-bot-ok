@@ -25,9 +25,6 @@ GROUP_ID = int(os.getenv("GROUP_ID", "-1002343579283"))
 THREAD_ID = int(os.getenv("THREAD_ID", "784"))
 OWNER_USER_ID = int(os.getenv("OWNER_USER_ID", "0"))
 
-# Model configurabil (implicit gpt-5-mini)
-OAI_MODEL = os.getenv("OAI_MODEL", "gpt-5-mini")
-
 SYSTEM_PROMPT = os.getenv("SYSTEM_PROMPT", (
     "Ești Asistentul Comunității pentru grupul lui Paul. Rol 100% educațional și de ghidaj.\n"
     "Ce faci: explici relația emoții–corp în cadrul (5LB/NMG, Recall Healing, spiritual), "
@@ -137,32 +134,8 @@ def explain_openai_error(e: Exception) -> str:
 async def call_openai(messages, temperature=0.4) -> str:
     def _call():
         try:
-            # Modelele gpt-5* folosesc Responses API
-            if OAI_MODEL.startswith("gpt-5"):
-                # Construim prompt text din messages (rol + conținut) – simplu și robust
-                parts = []
-                for m in messages:
-                    role = m.get("role", "user")
-                    content = m.get("content", "")
-                    if role == "system":
-                        parts.append(f"System: {content}")
-                    elif role == "user":
-                        parts.append(f"User: {content}")
-                    else:
-                        parts.append(f"{role.capitalize()}: {content}")
-                prompt = "\n\n".join(parts)
-
-                r = oai.responses.create(
-                    model=OAI_MODEL,
-                    input=prompt,                # Responses API folosește 'input'
-                    temperature=temperature,
-                    max_output_tokens=512,       # prag sigur; poți ajusta
-                )
-                return (getattr(r, "output_text", "") or "").strip()
-
-            # Alte modele (ex. gpt-4o-mini) -> Chat Completions
             r = oai.chat.completions.create(
-                model=OAI_MODEL,
+                model="gpt-4o-mini",
                 temperature=temperature,
                 messages=messages,
             )
