@@ -25,6 +25,8 @@ GROUP_ID = int(os.getenv("GROUP_ID", "-1002343579283"))
 THREAD_ID = int(os.getenv("THREAD_ID", "784"))
 OWNER_USER_ID = int(os.getenv("OWNER_USER_ID", "0"))
 
+OAI_MODEL = os.getenv("OAI_MODEL", "gpt-5-mini")
+
 SYSTEM_PROMPT = os.getenv("SYSTEM_PROMPT", (
     "Ești Asistentul Comunității pentru grupul lui Paul. Rol 100% educațional și de ghidaj.\n"
     "Ce faci: explici relația emoții–corp în cadrul (5LB/NMG, Recall Healing, spiritual), "
@@ -135,7 +137,7 @@ async def call_openai(messages, temperature=0.4) -> str:
     def _call():
         try:
             r = oai.chat.completions.create(
-                model="gpt-4o-mini",
+                model=OAI_MODEL,
                 temperature=temperature,
                 messages=messages,
             )
