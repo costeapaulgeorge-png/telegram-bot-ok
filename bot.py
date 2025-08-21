@@ -21,12 +21,9 @@ from openai import (
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-GROUP_ID  = int(os.getenv("GROUP_ID", "-1002343579283"))
+GROUP_ID = int(os.getenv("GROUP_ID", "-1002343579283"))
 THREAD_ID = int(os.getenv("THREAD_ID", "784"))
 OWNER_USER_ID = int(os.getenv("OWNER_USER_ID", "0"))
-
-# 👇 adăugată linia pentru model
-OAI_MODEL = os.getenv("OAI_MODEL", "gpt-5-mini")
 
 SYSTEM_PROMPT = os.getenv("SYSTEM_PROMPT", (
     "Ești Asistentul Comunității pentru grupul lui Paul. Rol 100% educațional și de ghidaj.\n"
@@ -125,7 +122,7 @@ def explain_openai_error(e: Exception) -> str:
     if isinstance(e, AuthenticationError):
         return "Auth error (401): cheie invalidă sau proiect greșit."
     if isinstance(e, NotFoundError):
-        return "Model error (404): modelul nu există / nu ai acces. Încearcă `gpt-4o-mini`, `gpt-4.1-mini` sau verifică permisiunile."
+        return "Model error (404): modelul nu există / nu ai acces. Încearcă gpt-4o-mini, gpt-4.1-mini sau verifică permisiunile."
     if isinstance(e, RateLimitError):
         return "Limită/credit (429): ai depășit cota sau nu ai fonduri."
     if isinstance(e, APIConnectionError):
@@ -138,7 +135,7 @@ async def call_openai(messages, temperature=0.4) -> str:
     def _call():
         try:
             r = oai.chat.completions.create(
-                model=OAI_MODEL,   # 👈 modificat să folosească variabila
+                model="gpt-4o-mini",
                 temperature=temperature,
                 messages=messages,
             )
@@ -152,4 +149,233 @@ async def call_openai(messages, temperature=0.4) -> str:
     return await loop.run_in_executor(ThreadPoolExecutor(max_workers=4), _call)
 
 # ---------------- Commands ----------------
-# (restul rămâne exact la fel ca în fișierul tău)
+async def whoami_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    u = update.effective_user
+    c = update.effective_chat
+    m = update.effective_message
+    txt = (
+        f"*User*\n- id: {u.id}\n- username: @{u.username}\n\n"
+        f"*Chat*\n- id: {c.id}\n- type: {c.type}\n"
+        f"- message_thread_id: {getattr(m,'message_thread_id', None)}\n"
+        f"- is_topic_message: {getattr(m,'is_topic_message', None)}"
+    )
+    await update.message.reply_text(txt, parse_mode=ParseMode.MARKDOWN)
+
+async def debug_on_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global _runtime_owner_id
+    _runtime_owner_id = update.effective_user.id
+    await update.message.reply_text("Debug ON ✅ – ești OWNER pentru sesiunea curentă.")
+
+async def debug_off_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global _runtime_owner_id
+    _runtime_owner_id = None
+    await update.message.reply_text("Debug OFF ✅")
+
+async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    ok, reason = place_check(update)
+    if not ok:
+        await update.message.reply_text(
+            "Salut! Scrie-mi în topicul dedicat din grup pentru a funcționa. 🙂\n"
+            "Comenzi utile: /whoami, /test_openai, /models, /test_group_post"
+        )
+        return
+
+    await update.message.reply_text(
+        "Salut! Sunt *Asistentul Comunității*.\n"
+        "• /ask <întrebare>\n"
+        "• /anonask <întrebare> (în privat)\n"
+        "• /resources | /privacy | /delete_me\n"
+        "• /whoami | /ping | /debug_on | /debug_env | /test_openai | /models | /test_group_post",
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+async def resources_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not in_allowed_place(update):
+        return
+    await update.message.reply_text(RESOURCES_TEXT, disable_web_page_preview=True)
+
+async def privacy_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not in_allowed_place(update):
+        return
+    await update.message.reply_text(PRIVACY_TEXT)
+
+async def delete_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not in_allowed_place(update):
+        return
+    await update.message.reply_text("Nu stocăm istoricul conversațiilor în acest MVP. ✅")
+
+async def ping_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    when = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    await update.message.reply_text(f"PONG 🏓 {when}")
+
+async def debug_env_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_owner(update.effective_user.id):
+        return
+    txt = (
+        "*Config curent (mascat)*\n"
+        f"- TELEGRAM_TOKEN: {mask(TELEGRAM_TOKEN)}\n"
+        f"- OPENAI_API_KEY: {mask(OPENAI_API_KEY)}\n"
+        f"- GROUP_ID: {GROUP_ID}\n"
+        f"- THREAD_ID: {THREAD_ID}\n"
+        f"- OWNER_USER_ID: {OWNER_USER_ID}\n"
+        f"- SYSTEM_PROMPT: {len(SYSTEM_PROMPT)} chars"
+    )
+    await update.message.reply_text(txt, parse_mode=ParseMode.MARKDOWN)
+
+async def models_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Enumeră câteva modele pentru a verifica accesul
+    try:
+        models = oai.models.list().data  # tipic disponibil în SDK 1.x
+        names = [m.id for m in models if "gpt" in m.id][:10]
+        if names:
+            await update.message.reply_text("Modele disponibile (primele 10):\n- " + "\n- ".join(names))
+        else:
+            await update.message.reply_text("Nu am primit niciun model. (verifică permisiunile/proiectul)")
+    except Exception as e:
+        await update.message.reply_text(f"Nu pot lista modelele: {explain_openai_error(e)}")
+
+async def test_openai_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Arată detaliat cauza, fără să necesite OWNER
+    try:
+        ans = await call_openai(
+            [{"role": "user", "content": "Spune doar: ok"}], temperature=0
+        )
+        await update.message.reply_text(f"OpenAI OK ✅ Răspuns: {ans}", parse_mode=ParseMode.MARKDOWN)
+    except Exception as e:
+        log.exception("/test_openai failed: %s", e)
+        await update.message.reply_text(
+            f"OpenAI NU răspunde ❌\n{explain_openai_error(e)}",
+            parse_mode=ParseMode.MARKDOWN
+        )
+
+async def test_group_post_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        msg = await context.bot.send_message(
+            chat_id=GROUP_ID,
+            message_thread_id=THREAD_ID,
+            text=f"Mesaj de test ✅ {datetime.utcnow().isoformat(timespec='seconds')}Z",
+            disable_web_page_preview=True
+        )
+        await update.message.reply_text(f"Postare în topic reușită ✅ (msg_id={msg.message_id})")
+    except Exception as e:
+        log.exception("test_group_post failed: %s", e)
+        await update.message.reply_text(
+            f"Nu pot posta în topicul setat ❌\n{e}"
+        )
+
+async def ask_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not in_allowed_place(update):
+        return await update.message.reply_text("Folosește /ask în topicul dedicat din grup. 🙂")
+
+    q = " ".join(context.args).strip()
+    if not q:
+        return await update.message.reply_text("Scrie: /ask întrebarea ta", parse_mode=ParseMode.MARKDOWN)
+
+    await send_typing(update, context)
+    try:
+        ans = await call_openai(
+            [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": q},
+            ],
+            temperature=0.4
+        )
+        if not ans:
+            raise RuntimeError("Răspuns gol de la OpenAI.")
+        await update.message.reply_text(ans, disable_web_page_preview=True)
+    except Exception as e:
+        log.exception("OpenAI error on /ask: %s", e)
+        await update.message.reply_text(
+            f"A apărut o eroare la OpenAI. {explain_openai_error(e)}"
+        )
+
+async def anonask_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type != ChatType.PRIVATE:
+        return await update.message.reply_text("Trimite-mi /anonask în privat, te rog. 😊")
+
+    q = " ".join(context.args).strip()
+    if not q:
+        return await update.message.reply_text("Scrie: /anonask întrebarea ta", parse_mode=ParseMode.MARKDOWN)
+
+    try:
+        ans = await call_openai(
+            [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": q},
+            ],
+            temperature=0.4
+        )
+        await context.bot.send_message(
+            chat_id=GROUP_ID,
+            message_thread_id=THREAD_ID,
+            text=f"*(Întrebare anonimă)*\n\n{ans}",
+            parse_mode=ParseMode.MARKDOWN,
+            disable_web_page_preview=True
+        )
+        await update.message.reply_text("Am postat răspunsul anonim în topicul comunității. ✅")
+    except Exception as e:
+        log.exception("Post to group error: %s", e)
+        await update.message.reply_text(
+            f"Nu am putut posta în grup (după apel OpenAI). {explain_openai_error(e)}"
+        )
+
+async def ids_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_owner(update.effective_user.id):
+        return
+    info = (
+        f"chat.id = {update.effective_chat.id}\n"
+        f"message_thread_id = {getattr(update.effective_message, 'message_thread_id', None)}\n"
+        f"is_topic_message = {getattr(update.effective_message, 'is_topic_message', None)}\n"
+        f"chat.type = {update.effective_chat.type}\n"
+        f"date = {datetime.fromtimestamp(update.effective_message.date.timestamp())}"
+    )
+    await update.message.reply_text(f"\n{info}\n", parse_mode=ParseMode.MARKDOWN)
+
+async def ignore_everything(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        uid = update.effective_user.id if update.effective_user else None
+        cid = update.effective_chat.id if update.effective_chat else None
+        log.info("Ignored message from user=%s chat=%s type=%s", uid, cid, update.effective_chat.type if update.effective_chat else None)
+    except Exception:
+        pass
+    return
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    log.exception("Unhandled error: %s (update=%s)", context.error, update)
+    try:
+        if isinstance(update, Update) and update.effective_message:
+            await update.effective_message.reply_text("Eroare internă. Reîncearcă.")
+    except Exception:
+        pass
+
+# ---------------- Main ----------------
+def main():
+    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+
+    app.add_handler(CommandHandler(["start", "help"], start_cmd))
+    app.add_handler(CommandHandler("resources", resources_cmd))
+    app.add_handler(CommandHandler("privacy", privacy_cmd))
+    app.add_handler(CommandHandler("delete_me", delete_cmd))
+    app.add_handler(CommandHandler("ask", ask_cmd))
+    app.add_handler(CommandHandler("anonask", anonask_cmd))
+
+    # Debug / test
+    app.add_handler(CommandHandler("whoami", whoami_cmd))
+    app.add_handler(CommandHandler("debug_on", debug_on_cmd))
+    app.add_handler(CommandHandler("debug_off", debug_off_cmd))
+    app.add_handler(CommandHandler("debug_env", debug_env_cmd))
+    app.add_handler(CommandHandler("ping", ping_cmd))
+    app.add_handler(CommandHandler("test_openai", test_openai_cmd))
+    app.add_handler(CommandHandler("test_group_post", test_group_post_cmd))
+    app.add_handler(CommandHandler("models", models_cmd))
+    app.add_handler(CommandHandler("ids", ids_cmd))
+
+    app.add_handler(MessageHandler(filters.ALL, ignore_everything))
+    app.add_error_handler(error_handler)
+
+    log.info("Botul pornește cu polling…")
+    log.info("Config: GROUP_ID=%s, THREAD_ID=%s, OWNER_USER_ID=%s", GROUP_ID, THREAD_ID, OWNER_USER_ID)
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
+
+if __name__ == "__main__":
+    main()
