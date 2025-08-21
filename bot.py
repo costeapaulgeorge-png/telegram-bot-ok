@@ -1,7 +1,7 @@
 import os
 import logging
 from datetime import datetime
-from concurrent.futures import ThreadPoolExecutor
+from typing import Optional
 
 from telegram import Update
 from telegram.constants import ChatAction, ParseMode, ChatType
@@ -14,18 +14,15 @@ from telegram.ext import (
 from openai import OpenAI
 
 # ---------------- ENV ----------------
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-# Grupul & topicul tău (au și valori default utile pt. test)
+# Grupul & topicul tău (au și valori default utile)
 GROUP_ID  = int(os.getenv("GROUP_ID", "-1002343579283"))
 THREAD_ID = int(os.getenv("THREAD_ID", "784"))
 
-# /ids este permis DOAR acestui user dacă e setat. Dacă 0/nesetat -> blocăm /ids (sau doar în DEBUG răspundem)
+# opțional, numai pentru /ids (dacă vrei să vezi rapid id-urile)
 OWNER_USER_ID = int(os.getenv("OWNER_USER_ID", "0"))
-
-# Mod debug (mesaje extinse de diagnostic în chat)
-DEBUG = os.getenv("DEBUG", "0") == "1"
 
 SYSTEM_PROMPT = os.getenv("SYSTEM_PROMPT", (
     "Ești Asistentul Comunității pentru grupul lui Paul. Rol 100% educațional și de ghidaj.\n"
@@ -39,7 +36,7 @@ SYSTEM_PROMPT = os.getenv("SYSTEM_PROMPT", (
     "germanische-heilkunde.at, amici-di-dirk.com, ghk-academy.info, newmedicine.ca"
 ))
 
-RESOURCES_TEXT = os.getenv("RESOURCES_TEXT",
+RESOURCES_TEXT = os.getenv("RESOURCES_TEXT", 
     "📚 **Resursele comunității**\n"
     "• Meditații: (adaugi linkurile tale)\n"
     "• Ghid întrebări de jurnal: (link)\n"
@@ -53,24 +50,18 @@ PRIVACY_TEXT = os.getenv("PRIVACY_TEXT",
 )
 
 if not TELEGRAM_TOKEN or not OPENAI_API_KEY:
-    raise RuntimeError("Setează TELEGRAM_TOKEN și OPENAI_API_KEY în environment (Railway → Variables).")
+    raise RuntimeError("Setează TELEGRAM_TOKEN și OPENAI_API_KEY în environment.")
 
 # ---------------- LOGGING ----------------
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("asistent-comunitate")
 
-# În DEBUG afișăm contexte utile (fără secrete)
-if DEBUG:
-    log.info("DEBUG ON | GROUP_ID=%s THREAD_ID=%s OWNER_USER_ID=%s", GROUP_ID, THREAD_ID, OWNER_USER_ID)
-
 # ---------------- OpenAI client ----------------
 oai = OpenAI(api_key=OPENAI_API_KEY)
-_executor = ThreadPoolExecutor(max_workers=4)
-
 
 async def ask_openai(user_msg: str) -> str:
     """
-    Apel OpenAI în thread separat ca să nu blocăm event-loop-ul PTB.
+    Apel sincronic la OpenAI rulat în thread separat ca să nu blocheze event loop-ul PTB.
     """
     def _call():
         r = oai.chat.completions.create(
@@ -83,9 +74,11 @@ async def ask_openai(user_msg: str) -> str:
         )
         return r.choices[0].message.content.strip()
 
-    from asyncio import get_event_loop
-    loop = get_event_loop()
-    return await loop.run_in_executor(_executor, _call)
+    # rulează în executor (thread pool)
+    from concurrent.futures import ThreadPoolExecutor
+    import asyncio
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(ThreadPoolExecutor(max_workers=4), _call)
 
 # ---------------- Helpers ----------------
 def in_allowed_place(update: Update) -> bool:
@@ -94,30 +87,12 @@ def in_allowed_place(update: Update) -> bool:
     """
     if not update.effective_chat or not update.effective_message:
         return False
-
-    # Doar în grupul specificat
     if update.effective_chat.id != GROUP_ID:
-        if DEBUG:
-            log.info("Mesaj refuzat: chat.id=%s != GROUP_ID=%s", update.effective_chat.id, GROUP_ID)
         return False
-
-    # Trebuie să fie topic & thread specific
-    msg = update.effective_message
-    is_topic = getattr(msg, "is_topic_message", False)
-    thread_id = getattr(msg, "message_thread_id", None)
-
-    if not is_topic:
-        if DEBUG:
-            log.info("Mesaj refuzat: nu e topic_message")
+    # trebuie să fie mesaj de topic și thread-id să fie cel dorit
+    if not getattr(update.effective_message, "is_topic_message", False):
         return False
-
-    if thread_id != THREAD_ID:
-        if DEBUG:
-            log.info("Mesaj refuzat: thread_id=%s != THREAD_ID=%s", thread_id, THREAD_ID)
-        return False
-
-    return True
-
+    return update.effective_message.message_thread_id == THREAD_ID
 
 async def send_typing(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -130,57 +105,34 @@ async def send_typing(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ---------------- Commands ----------------
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # /start nu e restricționat; răspundem oricui, dar scurt
+    if not in_allowed_place(update): 
+        return
     await update.message.reply_text(
         "Salut! Sunt *Asistentul Comunității*.\n"
-        "• /ping\n"
-        "• /whoami (debug)\n"
-        "• /ask <întrebare> (în topicul comunității)\n"
+        "• /ask <întrebare>\n"
+        "• /anonask <întrebare> (în privat)\n"
         "• /resources\n• /privacy\n• /delete_me",
         parse_mode=ParseMode.MARKDOWN
     )
 
-async def ping_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("pong ✅")
-
-async def whoami_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Mică comandă de diagnostic – utile ID-urile
-    msg = update.effective_message
-    info = (
-        f"user_id = {update.effective_user.id}\n"
-        f"chat_id = {update.effective_chat.id}\n"
-        f"thread_id = {getattr(msg, 'message_thread_id', None)}\n"
-        f"is_topic_message = {getattr(msg, 'is_topic_message', None)}"
-    )
-    await update.message.reply_text(f"```\n{info}\n```", parse_mode=ParseMode.MARKDOWN)
-
 async def resources_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not in_allowed_place(update):
-        if DEBUG:
-            await update.message.reply_text("Comanda /resources este permisă doar în topicul comunității.")
+    if not in_allowed_place(update): 
         return
     await update.message.reply_text(RESOURCES_TEXT, disable_web_page_preview=True)
 
 async def privacy_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not in_allowed_place(update):
-        if DEBUG:
-            await update.message.reply_text("Comanda /privacy este permisă doar în topicul comunității.")
+    if not in_allowed_place(update): 
         return
     await update.message.reply_text(PRIVACY_TEXT)
 
 async def delete_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not in_allowed_place(update):
-        if DEBUG:
-            await update.message.reply_text("Comanda /delete_me este permisă doar în topicul comunității.")
+    if not in_allowed_place(update): 
         return
     await update.message.reply_text("Nu stocăm istoricul conversațiilor în acest MVP. ✅")
 
 async def ask_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not in_allowed_place(update):
-        if DEBUG:
-            await update.message.reply_text("Comanda /ask este permisă doar în topicul comunității.")
         return
-
     q = " ".join(context.args).strip()
     if not q:
         return await update.message.reply_text("Scrie: `/ask întrebarea ta`", parse_mode=ParseMode.MARKDOWN)
@@ -191,13 +143,10 @@ async def ask_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(ans, disable_web_page_preview=True)
     except Exception as e:
         log.exception("OpenAI error: %s", e)
-        if DEBUG:
-            await update.message.reply_text(f"Eroare OpenAI: {e}")
-        else:
-            await update.message.reply_text("A apărut o eroare. Te rog încearcă din nou.")
+        await update.message.reply_text("A apărut o eroare. Te rog încearcă din nou.")
 
+# /anonask se trimite în PRIVAT → botul postează răspunsul anonim în topicul comunității
 async def anonask_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Folosit în PRIVATE – botul postează în topicul comunității
     if update.effective_chat.type != ChatType.PRIVATE:
         return await update.message.reply_text("Trimite-mi /anonask în privat, te rog. 😊")
 
@@ -217,23 +166,17 @@ async def anonask_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Am postat răspunsul anonim în topicul comunității. ✅")
     except Exception as e:
         log.exception("Post to group error: %s", e)
-        if DEBUG:
-            await update.message.reply_text(f"Nu am putut posta în grup: {e}")
-        else:
-            await update.message.reply_text("Nu am putut posta în grup. Verifică dacă botul este admin în grup.")
+        await update.message.reply_text("Nu am putut posta în grup. Verifică dacă botul este admin în grup.")
 
+# opțional – numai pentru tine (setează OWNER_USER_ID în env)
 async def ids_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Doar pentru OWNER_USER_ID (dacă e setat)
     if not OWNER_USER_ID or update.effective_user.id != OWNER_USER_ID:
-        if DEBUG:
-            await update.message.reply_text("Comanda /ids este permisă doar OWNER_USER_ID-ului configurat.")
         return
-    msg = update.effective_message
     info = (
         f"chat.id = {update.effective_chat.id}\n"
-        f"message_thread_id = {getattr(msg, 'message_thread_id', None)}\n"
-        f"is_topic_message = {getattr(msg, 'is_topic_message', None)}\n"
-        f"date = {datetime.fromtimestamp(msg.date.timestamp())}"
+        f"message_thread_id = {getattr(update.effective_message, 'message_thread_id', None)}\n"
+        f"is_topic_message = {getattr(update.effective_message, 'is_topic_message', None)}\n"
+        f"date = {datetime.fromtimestamp(update.effective_message.date.timestamp())}"
     )
     await update.message.reply_text(f"```\n{info}\n```", parse_mode=ParseMode.MARKDOWN)
 
@@ -245,15 +188,19 @@ async def ignore_everything(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
-    # Comenzi generale
     app.add_handler(CommandHandler(["start", "help"], start_cmd))
-    app.add_handler(CommandHandler("ping", ping_cmd))
-    app.add_handler(CommandHandler("whoami", whoami_cmd))
-
-    # Comenzi funcționale (legate de topic)
     app.add_handler(CommandHandler("resources", resources_cmd))
     app.add_handler(CommandHandler("privacy", privacy_cmd))
     app.add_handler(CommandHandler("delete_me", delete_cmd))
     app.add_handler(CommandHandler("ask", ask_cmd))
     app.add_handler(CommandHandler("anonask", anonask_cmd))
-    app.add_handler(CommandHandler("ids
+    app.add_handler(CommandHandler("ids", ids_cmd))  # doar pt. OWNER_USER_ID
+
+    # orice altceva ignorăm (asigură „tăcerea” în afara topicului)
+    app.add_handler(MessageHandler(filters.ALL, ignore_everything))
+
+    log.info("Botul pornește cu polling…")
+    app.run_polling()
+
+if __name__ == "__main__":
+    main()
