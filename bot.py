@@ -24,6 +24,7 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 GROUP_ID = int(os.getenv("GROUP_ID", "-1002343579283"))
 THREAD_ID = int(os.getenv("THREAD_ID", "784"))
 OWNER_USER_ID = int(os.getenv("OWNER_USER_ID", "0"))
+OAI_MODEL = os.getenv("OAI_MODEL", "gpt-5-mini")
 
 SYSTEM_PROMPT = os.getenv("SYSTEM_PROMPT", (
     "Ești Asistentul Comunității pentru grupul lui Paul. Rol 100% educațional și de ghidaj.\n"
