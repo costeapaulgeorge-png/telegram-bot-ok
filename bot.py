@@ -25,8 +25,6 @@ GROUP_ID = int(os.getenv("GROUP_ID", "-1002343579283"))
 THREAD_ID = int(os.getenv("THREAD_ID", "784"))
 OWNER_USER_ID = int(os.getenv("OWNER_USER_ID", "0"))
 
-OAI_MODEL = os.getenv("OAI_MODEL", "gpt-5-mini")
-
 SYSTEM_PROMPT = os.getenv("SYSTEM_PROMPT", (
     "Ești Asistentul Comunității pentru grupul lui Paul. Rol 100% educațional și de ghidaj.\n"
     "Ce faci: explici relația emoții–corp în cadrul (5LB/NMG, Recall Healing, spiritual), "
@@ -136,6 +134,28 @@ def explain_openai_error(e: Exception) -> str:
 async def call_openai(messages, temperature=0.4) -> str:
     def _call():
         try:
+            # Modelele gpt-5* folosesc Responses API
+            if OAI_MODEL.startswith("gpt-5"):
+                parts = []
+                for m in messages:
+                    role = m.get("role", "user")
+                    content = m.get("content", "")
+                    if role == "system":
+                        parts.append(f"System: {content}")
+                    elif role == "user":
+                        parts.append(f"User: {content}")
+                    else:
+                        parts.append(f"{role.capitalize()}: {content}")
+                prompt = "\n\n".join(parts)
+
+                r = oai.responses.create(
+                    model=OAI_MODEL,
+                    input=prompt,
+                    temperature=temperature,
+                )
+                return (getattr(r, "output_text", "") or "").strip()
+
+            # altfel, Chat Completions API
             r = oai.chat.completions.create(
                 model=OAI_MODEL,
                 temperature=temperature,
@@ -375,9 +395,7 @@ def main():
     app.add_handler(MessageHandler(filters.ALL, ignore_everything))
     app.add_error_handler(error_handler)
 
-    log.info("Botul pornește cu polling…")
-    log.info("Config: GROUP_ID=%s, THREAD_ID=%s, OWNER_USER_ID=%s", GROUP_ID, THREAD_ID, OWNER_USER_ID)
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    app.run_polling()
 
 if __name__ == "__main__":
     main()
